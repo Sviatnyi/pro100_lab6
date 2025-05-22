@@ -9,7 +9,7 @@ app = FastAPI()
 db = mysql.connector.connect(
     host="localhost",
     user="root",
-    password="1234",
+    password="***************",
     database="opendata"
 )
 
