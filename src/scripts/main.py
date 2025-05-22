@@ -1,128 +1,105 @@
-from fastapi import FastAPI, HTTPException, status
-from typing import List
-from config import get_connection
-from models_for import RoleInDB, RoleCreate, RoleUpdate, AccessInDB, AccessCreate, AccessUpdate, TagInDB, TagCreate, TagUpdate
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import mysql.connector
+from typing import List, Optional
 
-app = FastAPI(title="OpenData RESTful API")
+app = FastAPI()
 
-# ======== HELPER FUNCTIONS ==========
-def fetch_all(table: str):
-    with get_connection() as conn:
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(f"SELECT * FROM {table}")
-        return cursor.fetchall()
+# Параметри підключення до бази
+db = mysql.connector.connect(
+    host="localhost",
+    user="root",
+    password="1234",
+    database="opendata"
+)
 
-def fetch_by_id(table: str, key: str, value: int):
-    with get_connection() as conn:
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(f"SELECT * FROM {table} WHERE {key} = %s", (value,))
-        result = cursor.fetchone()
-        if not result:
-            raise HTTPException(status_code=404, detail=f"{table.capitalize()} not found")
-        return result
+# ======== Pydantic моделі ========
+class Role(BaseModel):
+    name: str
 
-def insert_data(query: str, values: tuple):
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute(query, values)
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            raise HTTPException(status_code=500, detail=str(e))
+class RoleOut(Role):
+    role_id: int
 
-def update_data(table: str, key: str, value: int, update_data: dict):
-    if not update_data:
-        raise HTTPException(status_code=400, detail="No data to update")
-    fields = ', '.join(f"{k} = %s" for k in update_data)
-    query = f"UPDATE {table} SET {fields} WHERE {key} = %s"
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute(query, list(update_data.values()) + [value])
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            raise HTTPException(status_code=500, detail=str(e))
+class Category(BaseModel):
+    name: str
+    parent_category_id: Optional[int] = None
 
-def delete_by_id(table: str, key: str, value: int):
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute(f"DELETE FROM {table} WHERE {key} = %s", (value,))
-            conn.commit()
-            if cursor.rowcount == 0:
-                raise HTTPException(status_code=404, detail=f"{table.capitalize()} not found")
-        except Exception as e:
-            conn.rollback()
-            raise HTTPException(status_code=500, detail=str(e))
+class CategoryOut(Category):
+    category_id: int
 
-# ========== ROLE ENDPOINTS ==========
-@app.get("/role", response_model=List[RoleInDB], tags=["Role"])
-async def get_all_roles():
-    return fetch_all("role")
+# ======== ROLE endpoints ========
 
-@app.get("/role/{role_id}", response_model=RoleInDB, tags=["Role"])
-async def get_role(role_id: int):
-    return fetch_by_id("role", "role_id", role_id)
+@app.get("/roles", response_model=List[RoleOut])
+def get_roles():
+    cursor = db.cursor()
+    cursor.execute("SELECT role_id, name FROM role")
+    roles = cursor.fetchall()
+    return [{"role_id": r[0], "name": r[1]} for r in roles]
 
-@app.post("/role", response_model=dict, status_code=201, tags=["Role"])
-async def create_role(role: RoleCreate):
-    insert_data("INSERT INTO role (name) VALUES (%s)", (role.name,))
-    return {"message": "Role added"}
+@app.post("/roles", response_model=RoleOut, status_code=201)
+def create_role(role: Role):
+    cursor = db.cursor()
+    try:
+        cursor.execute("INSERT INTO role (name) VALUES (%s)", (role.name,))
+        db.commit()
+        return {"role_id": cursor.lastrowid, "name": role.name}
+    except mysql.connector.IntegrityError:
+        raise HTTPException(status_code=400, detail="Role with this name already exists")
 
-@app.put("/role/{role_id}", response_model=RoleInDB, tags=["Role"])
-async def update_role(role_id: int, role_update: RoleUpdate):
-    update_data("role", "role_id", role_id, role_update.model_dump(exclude_unset=True))
-    return get_role(role_id)
+@app.put("/roles/{role_id}", response_model=RoleOut)
+def update_role(role_id: int, role: Role):
+    cursor = db.cursor()
+    cursor.execute("UPDATE role SET name = %s WHERE role_id = %s", (role.name, role_id))
+    db.commit()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Role not found")
+    return {"role_id": role_id, "name": role.name}
 
-@app.delete("/role/{role_id}", response_model=dict, tags=["Role"])
-async def delete_role(role_id: int):
-    delete_by_id("role", "role_id", role_id)
-    return {"message": f"Role with id {role_id} deleted"}
-@app.get("/access", response_model=List[AccessInDB], tags=["Access"])
-async def get_all_accesses():
-    return fetch_all("access")
+@app.delete("/roles/{role_id}")
+def delete_role(role_id: int):
+    cursor = db.cursor()
+    cursor.execute("DELETE FROM role WHERE role_id = %s", (role_id,))
+    db.commit()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Role not found")
+    return {"message": "Role deleted"}
 
-@app.get("/access/{access_id}", response_model=AccessInDB, tags=["Access"])
-async def get_access(access_id: int):
-    return fetch_by_id("access", "access_id", access_id)
+# ======== CATEGORY endpoints ========
 
-@app.post("/access", response_model=dict, status_code=201, tags=["Access"])
-async def create_access(access: AccessCreate):
-    insert_data("INSERT INTO access (name) VALUES (%s)", (access.name,))
-    return {"message": "Access added"}
+@app.get("/categories", response_model=List[CategoryOut])
+def get_categories():
+    cursor = db.cursor()
+    cursor.execute("SELECT category_id, name, parent_category_id FROM category")
+    cats = cursor.fetchall()
+    return [{"category_id": c[0], "name": c[1], "parent_category_id": c[2]} for c in cats]
 
-@app.put("/access/{access_id}", response_model=AccessInDB, tags=["Access"])
-async def update_access(access_id: int, access_update: AccessUpdate):
-    update_data("access", "access_id", access_id, access_update.model_dump(exclude_unset=True))
-    return get_access(access_id)
+@app.post("/categories", response_model=CategoryOut, status_code=201)
+def create_category(cat: Category):
+    cursor = db.cursor()
+    cursor.execute(
+        "INSERT INTO category (name, parent_category_id) VALUES (%s, %s)",
+        (cat.name, cat.parent_category_id)
+    )
+    db.commit()
+    return {"category_id": cursor.lastrowid, "name": cat.name, "parent_category_id": cat.parent_category_id}
 
-@app.delete("/access/{access_id}", response_model=dict, tags=["Access"])
-async def delete_access(access_id: int):
-    delete_by_id("access", "access_id", access_id)
-    return {"message": f"Access with id {access_id} deleted"}
+@app.put("/categories/{category_id}", response_model=CategoryOut)
+def update_category(category_id: int, cat: Category):
+    cursor = db.cursor()
+    cursor.execute(
+        "UPDATE category SET name = %s, parent_category_id = %s WHERE category_id = %s",
+        (cat.name, cat.parent_category_id, category_id)
+    )
+    db.commit()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Category not found")
+    return {"category_id": category_id, "name": cat.name, "parent_category_id": cat.parent_category_id}
 
-
-@app.get("/tag", response_model=List[TagInDB], tags=["Tag"])
-async def get_all_tags():
-    return fetch_all("tag")
-
-@app.get("/tag/{tag_id}", response_model=TagInDB, tags=["Tag"])
-async def get_tag(tag_id: int):
-    return fetch_by_id("tag", "tag_id", tag_id)
-
-@app.post("/tag", response_model=dict, status_code=201, tags=["Tag"])
-async def create_tag(tag: TagCreate):
-    insert_data("INSERT INTO tag (name) VALUES (%s)", (tag.name,))
-    return {"message": "Tag added"}
-
-@app.put("/tag/{tag_id}", response_model=TagInDB, tags=["Tag"])
-async def update_tag(tag_id: int, tag_update: TagUpdate):
-    update_data("tag", "tag_id", tag_id, tag_update.model_dump(exclude_unset=True))
-    return get_tag(tag_id)
-
-@app.delete("/tag/{tag_id}", response_model=dict, tags=["Tag"])
-async def delete_tag(tag_id: int):
-    delete_by_id("tag", "tag_id", tag_id)
-    return {"message": f"Tag with id {tag_id} deleted"}
+@app.delete("/categories/{category_id}")
+def delete_category(category_id: int):
+    cursor = db.cursor()
+    cursor.execute("DELETE FROM category WHERE category_id = %s", (category_id,))
+    db.commit()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Category not found")
+    return {"message": "Category deleted"}
